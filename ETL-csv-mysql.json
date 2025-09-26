@@ -1,0 +1,341 @@
+{
+  "name": "ETL-CORP-01",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {},
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "534e0ef2-03ff-498f-a0c8-f26753c426d2",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        256,
+        -320
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "yNp0TU6D3emCDG7X",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "setAllData": false,
+        "options": {
+          "encoding": "utf8"
+        }
+      },
+      "name": "Convertir Binario a Texto",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1,
+      "position": [
+        704,
+        -320
+      ],
+      "id": "bbf3b653-b1a0-4a0e-86c6-5aed0e45de59"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Configuración\nconst ASUNTO_REQUERIDO = \"DATOS\";\nconst NOMBRE_ARCHIVO_REQUERIDO = \"ppto_bicorps (1).csv\";\n\nreturn items.flatMap(item => {\n  // 1. Validar que el asunto coincida (insensible a mayúsculas y espacios)\n  const subject = item.json.subject;\n  if (!subject || subject.trim().toLowerCase() !== ASUNTO_REQUERIDO.toLowerCase()) {\n    return []; // Ignorar correo si no cumple el asunto\n  }\n\n  // 2. Buscar el adjunto con nombre EXACTO (insensible a mayúsculas)\n  const attachmentEntry = Object.entries(item.binary || {}).find(\n    ([key, value]) =>\n      key.startsWith('attachment_') &&\n      value?.fileName?.toLowerCase() === NOMBRE_ARCHIVO_REQUERIDO.toLowerCase()\n  );\n\n  if (!attachmentEntry) {\n    return []; // No se encontró el archivo requerido\n  }\n\n  const att = attachmentEntry[1];\n\n  // 3. Opcional: Validar contenido (eliminar BOM, rechazar si tiene \"Exif\")\n  if (att.data && typeof att.data === 'string') {\n    // Eliminar BOM si existe\n    if (att.data.startsWith('\\uFEFF')) {\n      att.data = att.data.slice(1);\n    }\n    // Rechazar si contiene \"Exif\" (no es CSV válido)\n    if (att.data.includes('Exif')) {\n      return [];\n    }\n  }\n\n  // 4. Devolver item listo para binaryToText\n  return [{\n    json: { ...item.json },        // Metadatos del correo\n    binary: { data: att }          // Archivo adjunto listo\n  }];\n});"
+      },
+      "name": "Filtrar y Preparar Adjunto",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        464,
+        -320
+      ],
+      "id": "4c6ad9f9-a97c-444f-909a-7e235c04d859"
+    },
+    {
+      "parameters": {
+        "functionCode": "return items.map(item => {\n  const src = item.json || {};\n  \n  // Normalizar claves (mayúsculas)\n  const keys = {};\n  for (const key of Object.keys(src)) {\n    keys[key.trim().toUpperCase()] = src[key];\n  }\n\n  // Normalizar MONTO (ej: \"-1.378,08\" → -1378.08)\n  let monto = keys[\"MONTO\"] || \"0\";\n  if (typeof monto === \"string\") {\n    monto = monto.replace(/\\./g, \"\").replace(\",\", \".\");\n  }\n  monto = parseFloat(monto) || 0;\n\n  return {\n    json: {\n      \"CENTRO_CONTABLE\": keys[\"CENTRO CONTABLE\"] || null,\n      \"EJERCIICIO\": keys[\"EJERCIICIO\"] || null,\n      \"MES\": keys[\"MES\"] || null,\n      \"MONEDA\": keys[\"MONEDA\"] || null,\n      \"CENTRO_DE_COSTO\": keys[\"CENTRO DE COSTO\"] || null,\n      \"CUENTA\": keys[\"CUENTA\"] || null,\n      \"MONTO\": monto\n    }\n  };\n});\n"
+      },
+      "name": "Limpieza Datos",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        480,
+        -96
+      ],
+      "id": "19e2b3b9-4e32-4e0e-a647-ad64fb4430b4"
+    },
+    {
+      "parameters": {
+        "batchSize": 100,
+        "options": {}
+      },
+      "name": "Split In Batches1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        720,
+        -96
+      ],
+      "id": "acd6775e-794d-43f7-a29a-b36851ec5571"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parsear CSV robusto: detecta delimitador (; o ,), normaliza BOM y saltos de línea,\n// procesa todos los items entrantes (por si hay múltiples adjuntos).\nconst output = [];\n\nfor (const item of items) {\n  const csvText = item.json?.data;\n  if (!csvText || typeof csvText !== 'string') continue;\n\n  // Quitar BOM y normalizar saltos de línea\n  let text = csvText.replace(/^\\uFEFF/, '').replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n');\n\n  // Separar líneas y quitar líneas vacías al principio/final\n  const lines = text.split('\\n').map(l => l.trim()).filter(l => l.length > 0);\n  if (lines.length === 0) continue;\n\n  // Detectar delimitador por la primera línea (header)\n  const first = lines[0];\n  const semiCount = (first.match(/;/g) || []).length;\n  const commaCount = (first.match(/,/g) || []).length;\n  const delim = semiCount > commaCount ? ';' : ',';\n\n  // Encabezados\n  const headers = first.split(delim).map(h => h.trim().replace(/^\"|\"$/g, ''));\n\n  // Procesar filas\n  for (let i = 1; i < lines.length; i++) {\n    const values = lines[i].split(delim).map(v => v.trim().replace(/^\"|\"$/g, ''));\n    const obj = {};\n    for (let h = 0; h < headers.length; h++) {\n      obj[headers[h]] = values[h] ?? '';\n    }\n    output.push({ json: obj });\n  }\n}\n\nreturn output;\n"
+      },
+      "name": "Parsear csv",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        880,
+        -320
+      ],
+      "id": "5f7b7ef5-6939-451f-a07e-4a9950652612"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "hechos_pptogastos",
+          "mode": "list",
+          "cachedResultName": "hechos_pptogastos"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ejercicio": "={{ $json.EJERCIICIO }}",
+            "mes": "={{ $json.MES }}",
+            "monto": "={{ $json.MONTO }}",
+            "centro_contable": "={{ $json.CENTRO_CONTABLE }}",
+            "moneda": "={{ $json.MONEDA }}",
+            "centro_de_costo": "={{ $json.CENTRO_DE_COSTO }}",
+            "cuenta": "={{ $json.CUENTA }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "empresa",
+              "displayName": "empresa",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "centro_contable",
+              "displayName": "centro_contable",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ejercicio",
+              "displayName": "ejercicio",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mes",
+              "displayName": "mes",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "moneda",
+              "displayName": "moneda",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "centro_de_costo",
+              "displayName": "centro_de_costo",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cuenta",
+              "displayName": "cuenta",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "monto",
+              "displayName": "monto",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        944,
+        -96
+      ],
+      "id": "31d7eae5-53a2-46bc-bf9f-91137e33b218",
+      "name": "Insert rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "GuS6E679R4JTGX5u",
+          "name": "Postgres_test"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Filtrar y Preparar Adjunto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar y Preparar Adjunto": {
+      "main": [
+        [
+          {
+            "node": "Convertir Binario a Texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convertir Binario a Texto": {
+      "main": [
+        [
+          {
+            "node": "Parsear csv",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limpieza Datos": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches1": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear csv": {
+      "main": [
+        [
+          {
+            "node": "Limpieza Datos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "1566f28f-6315-43d7-b7f5-342eeb81919c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d251ad46a28acb1a9c5517081562e88ab4bbd8c8852c190c35b3f2a551b34e47"
+  },
+  "id": "7ldHdRCjFv8Vzdje",
+  "tags": [
+    {
+      "createdAt": "2025-09-22T19:49:47.565Z",
+      "updatedAt": "2025-09-22T19:49:47.565Z",
+      "id": "u1jswsv40nzFf7oC",
+      "name": "ETL"
+    }
+  ]
+}
