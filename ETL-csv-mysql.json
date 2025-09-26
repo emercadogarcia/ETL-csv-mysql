@@ -116,7 +116,7 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "ejercicio": "={{ $json.EJERCIICIO }}",
+            "ejercicio": "={{ $json.EJERCICIO }}",
             "mes": "={{ $json.MES }}",
             "monto": "={{ $json.MONTO }}",
             "centro_contable": "={{ $json.CENTRO_CONTABLE }}",
